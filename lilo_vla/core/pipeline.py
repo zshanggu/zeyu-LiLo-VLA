@@ -1307,6 +1307,9 @@ class LongHorizonPipeline:
                 if not self.continue_on_failure:
                     self._print_recovery_summary(recovery_stats, self.success_count, self.total_skills)
                     self.recovery_stats = recovery_stats
+                    self._stop_video()
+                    if self.env:
+                        self.env.close()
                     return False
 
             # Save skill stats
