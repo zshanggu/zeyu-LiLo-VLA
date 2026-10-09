@@ -1189,7 +1189,7 @@ class LongHorizonPipeline:
 
                         # Reset predicate baselines before pick recovery to prevent false positives
                         # (e.g., when object is already elevated from failed place operation)
-                        self.skill_checker.reset_predicate_baselines(previous_skill)
+                        self.skill_checker.reset_predicate_baselines(self.env, previous_skill)
 
                         # Re-execute pick with retry loop
                         pick_success = False
@@ -1233,7 +1233,7 @@ class LongHorizonPipeline:
 
                     # Reset predicate baselines for pick skills to ensure fresh baseline at current position
                     if skill_type == 'pick':
-                        self.skill_checker.reset_predicate_baselines(skill)
+                        self.skill_checker.reset_predicate_baselines(self.env, skill)
 
                     # Execute skill
                     success, task_done, vla_lang, failure_stage, target_obj = self._execute_skill_once(

@@ -118,6 +118,36 @@ def check_skill_success(env, bddl_file_path: str, debug: bool = False) -> bool:
         return False
 
 
+def _resolve_object_name(env, object_name: str) -> Optional[str]:
+    """
+    Resolve a configured object name to its actual key in env.object_states_dict.
+
+    Mirrors the fallback resolution _eval_predicate() applies inline (object_mappings,
+    then longest-match-wins startswith search) -- e.g. "akita_black_bowl_1_main" has no
+    "_main" entry in some scenes' object_states_dict, so it falls back to "akita_black_bowl_1".
+    reset_predicate_baselines() must apply the SAME resolution before deleting a baseline,
+    or it silently targets a key the PickedUp predicate never actually wrote to (it always
+    stores under arg.object_name, i.e. whatever this resolution already picked at check time).
+
+    Returns the resolved key, or None if no match is found.
+    """
+    if object_name in env.object_states_dict:
+        return object_name
+
+    config = get_cached_config()
+    object_mappings = config.get("object_mappings", {})
+    mapped_name = object_mappings.get(object_name)
+    if mapped_name and mapped_name in env.object_states_dict:
+        return mapped_name
+
+    base_name = object_name.rsplit('_', 1)[0] if '_' in object_name else object_name
+    for obj_name in env.object_states_dict.keys():
+        if obj_name.startswith(base_name):
+            return obj_name
+
+    return None
+
+
 def _eval_predicate(env, state: Tuple, debug: bool = False) -> bool:
     """
     Evaluate a single BDDL predicate.
@@ -546,22 +576,28 @@ def check_skill_success_with_predicates(env, goal_state: List[Tuple], debug: boo
         return False
 
 
-def reset_predicate_baselines(skill_language: str, debug: bool = False):
+def reset_predicate_baselines(env, skill_language: str, debug: bool = False):
     """
     Reset PickedUp predicate baseline heights for objects involved in this skill.
 
     This function clears stale baseline heights from the PickedUp predicate's internal state.
     This is necessary when an object's position has changed significantly (e.g., after a failed
     place operation that leaves the object elevated), and we need the predicate to record a
-    new baseline height at the current position.
+    new baseline height at the current position. It is also necessary across unrelated runs:
+    the 'pickedup' predicate is a process-wide singleton (see libero_compat.py), so a stale
+    baseline from a PREVIOUS task's scene (a different object resting height) otherwise leaks
+    into the next task that happens to touch the same-rooted object name and can make a pick
+    report success instantly, before the robot has done anything.
 
     Args:
+        env: LIBERO gym environment (used to resolve the configured object name to whatever
+            key the predicate actually stores under -- see _resolve_object_name()).
         skill_language: Skill language description (e.g., "pick frying pan 1")
         debug: Whether to print debug information
 
     Example:
         Before pick recovery, reset baselines to prevent false positives when object is already elevated:
-        >>> reset_predicate_baselines("pick frying pan 1")
+        >>> reset_predicate_baselines(env, "pick frying pan 1")
     """
     try:
         from libero.libero.envs.predicates import get_predicate_fn
@@ -586,12 +622,35 @@ def reset_predicate_baselines(skill_language: str, debug: bool = False):
                 print(f"   ⚠️  No target_object found for skill '{skill_language}', skipping baseline reset")
             return
 
-        # Clear this object's baseline height if it exists
-        if hasattr(pickedup_predicate, 'initial_heights') and target_object in pickedup_predicate.initial_heights:
-            del pickedup_predicate.initial_heights[target_object]
-            print(f"   🔄 Reset baseline height for {target_object}")
+        # Unwrap environment if needed, same as check_skill_success_* does
+        base_env = env
+        while hasattr(base_env, 'env') and not hasattr(base_env, 'object_states_dict'):
+            base_env = base_env.env
+
+        # Resolve to the SAME key the PickedUp predicate actually stores under (it keys off
+        # arg.object_name, i.e. whatever _eval_predicate's fallback resolution picked at check
+        # time -- a plain dict lookup on the configured name misses it whenever that fallback
+        # kicked in, which is why this predicate's baseline was never actually being cleared).
+        resolved_object = _resolve_object_name(base_env, target_object)
+        if resolved_object is None:
+            resolved_object = target_object  # fall back to the raw name as a last resort
+
+        initial_heights = getattr(pickedup_predicate, 'initial_heights', {})
+
+        # Clear every baseline that could plausibly correspond to this object: the resolved
+        # key, the raw configured name, and the de-suffixed base name -- covers runs recorded
+        # under any of them (e.g. from before this resolution fix existed).
+        base_name = target_object.rsplit('_', 1)[0] if '_' in target_object else target_object
+        candidates = {resolved_object, target_object, base_name}
+        cleared = [k for k in candidates if k in initial_heights]
+        for k in cleared:
+            del initial_heights[k]
+
+        if cleared:
+            print(f"   🔄 Reset baseline height for {target_object} (cleared: {cleared})")
         elif debug:
-            print(f"   ℹ️  No baseline height stored for {target_object}, nothing to reset")
+            print(f"   ℹ️  No baseline height stored for {target_object} "
+                  f"(resolved: {resolved_object}; current keys: {list(initial_heights.keys())})")
 
     except Exception as e:
         if debug:
